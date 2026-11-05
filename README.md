@@ -15,7 +15,7 @@ cargo run --release
 
 A debug build will decode and present far below 60 fps. Use `--release`.
 
-Plug the ShadowCast in over USB 3. Auto starts at 1080p60; the Format menu can pick any mode the device advertises.
+Plug the ShadowCast in over USB 3. Auto starts at 1080p60. The toolbar has separate Resolution and FPS menus (720p–4K, 30/50/60/120). Pixel format lives in Settings. Together they pick the same UVC mode the old long format list did.
 
 ## Roadmap
 

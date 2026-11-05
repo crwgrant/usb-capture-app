@@ -111,6 +111,12 @@ pub struct AppSettings {
     pub capture_preset: CapturePreset,
     #[serde(default)]
     pub pixel_format: PixelFormatPref,
+    #[serde(default = "default_auto")]
+    pub resolution_id: String,
+    #[serde(default = "default_auto")]
+    pub fps_id: String,
+    #[serde(default, skip_serializing)]
+    pub mode_id: String,
     #[serde(default = "default_capture_buffers")]
     pub capture_buffers: u32,
     #[serde(default = "default_audio_buffer")]
@@ -133,11 +139,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_auto() -> String {
+    "auto".into()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             capture_preset: CapturePreset::Balanced,
             pixel_format: PixelFormatPref::Auto,
+            resolution_id: "auto".into(),
+            fps_id: "auto".into(),
+            mode_id: String::new(),
             capture_buffers: 2,
             audio_buffer: 128,
             vsync: true,
@@ -197,7 +210,27 @@ impl AppSettings {
         if self.hardware_decode {
             self.hardware_decode = false;
         }
+        if self.resolution_id == "auto"
+            && self.fps_id == "auto"
+            && let Some(((width, height), fps)) = parse_legacy_mode(&self.mode_id)
+        {
+            self.resolution_id = format!("{width}x{height}");
+            self.fps_id = fps.to_string();
+        }
+        self.mode_id.clear();
     }
+}
+
+fn parse_legacy_mode(id: &str) -> Option<((u32, u32), u32)> {
+    if id.is_empty() || id == "auto" {
+        return None;
+    }
+    let (size, fps) = id.split_once('@')?;
+    let (width, height) = size.split_once('x')?;
+    Some((
+        (width.parse().ok()?, height.parse().ok()?),
+        fps.parse().ok()?,
+    ))
 }
 
 fn settings_path() -> PathBuf {

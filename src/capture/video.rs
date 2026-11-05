@@ -50,14 +50,12 @@ impl CaptureFormat {
         )
     }
 
-    pub fn id(&self) -> String {
-        format!(
-            "{}x{}@{}:{}",
-            self.width,
-            self.height,
-            self.fps,
-            fourcc_name(self.fourcc)
-        )
+    pub fn size_id(&self) -> String {
+        format!("{}x{}", self.width, self.height)
+    }
+
+    pub fn size_label(&self) -> String {
+        format!("{}×{}", self.width, self.height)
     }
 
     fn from_camera(format: CameraFormat) -> Self {
@@ -210,6 +208,44 @@ pub fn preferred_format(
         .iter()
         .min_by(|a, b| compare_formats(a, b, settings))
         .cloned()
+}
+
+/// Pick a device mode from resolution, fps, and pixel-format preferences.
+pub fn resolve_format(
+    formats: &[CaptureFormat],
+    resolution_id: &str,
+    fps_id: &str,
+    settings: &AppSettings,
+) -> Option<CaptureFormat> {
+    let size = parse_size_id(resolution_id);
+    let fps = parse_fps_id(fps_id);
+    let candidates = formats
+        .iter()
+        .filter(|format| {
+            size.is_none_or(|(width, height)| format.width == width && format.height == height)
+        })
+        .filter(|format| fps.is_none_or(|fps| format.fps == fps))
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return preferred_format(formats, settings);
+    }
+    preferred_format(&candidates, settings)
+}
+
+fn parse_size_id(id: &str) -> Option<(u32, u32)> {
+    if id.is_empty() || id == "auto" {
+        return None;
+    }
+    let (width, height) = id.split_once('x')?;
+    Some((width.parse().ok()?, height.parse().ok()?))
+}
+
+fn parse_fps_id(id: &str) -> Option<u32> {
+    if id.is_empty() || id == "auto" {
+        return None;
+    }
+    id.parse().ok()
 }
 
 fn compare_formats(

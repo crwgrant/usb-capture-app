@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 
 use crate::capture::{
     CaptureDevice, CaptureFormat, CaptureSession, VideoFrame, enumerate_devices, list_formats,
-    preferred_format,
+    resolve_format,
 };
 use crate::settings::{
     APP_NAME, APP_REPO, APP_VERSION, AppSettings, CapturePreset, PixelFormatPref,
@@ -242,7 +242,8 @@ pub struct Viewer {
     devices: Vec<CaptureDevice>,
     formats: Vec<CaptureFormat>,
     device_select: Entity<SelectState<Vec<DeviceItem>>>,
-    format_select: Entity<SelectState<Vec<FormatItem>>>,
+    resolution_select: Entity<SelectState<Vec<FormatItem>>>,
+    fps_select: Entity<SelectState<Vec<FormatItem>>>,
     preset_select: Entity<SelectState<Vec<SettingItem>>>,
     pixel_select: Entity<SelectState<Vec<SettingItem>>>,
     buffer_select: Entity<SelectState<Vec<SettingItem>>>,
@@ -276,21 +277,20 @@ impl Viewer {
             });
         }
         let settings = AppSettings::load();
-        let format_items = format_items(&formats, &settings);
-        let preferred_row = preferred_format(&formats, &settings).and_then(|preferred| {
-            formats
-                .iter()
-                .position(|format| format.id() == preferred.id())
-                .map(|row| row + 1)
-        });
-        let format_select = cx.new(|cx| {
+        let resolution_items = resolution_items(&formats, &settings);
+        let resolution_row = item_row(&resolution_items, &settings.resolution_id);
+        let resolution_select = cx.new(|cx| {
             SelectState::new(
-                format_items,
-                Some(IndexPath::new(preferred_row.unwrap_or(0))),
+                resolution_items,
+                Some(IndexPath::new(resolution_row)),
                 window,
                 cx,
             )
         });
+        let fps_items = fps_items(&formats, &settings.resolution_id);
+        let fps_row = item_row(&fps_items, &settings.fps_id);
+        let fps_select =
+            cx.new(|cx| SelectState::new(fps_items, Some(IndexPath::new(fps_row)), window, cx));
 
         let preset_select = cx.new(|cx| {
             SelectState::new(
@@ -359,7 +359,8 @@ impl Viewer {
             devices,
             formats,
             device_select,
-            format_select,
+            resolution_select,
+            fps_select,
             preset_select,
             pixel_select,
             buffer_select,
@@ -424,6 +425,19 @@ impl Viewer {
             },
         ));
         viewer._subscriptions.push(cx.subscribe_in(
+            &viewer.resolution_select,
+            window,
+            |this, _, _: &SelectEvent<Vec<FormatItem>>, window, cx| {
+                this.on_resolution_changed(window, cx);
+            },
+        ));
+        viewer._subscriptions.push(cx.subscribe(
+            &viewer.fps_select,
+            |this, _, _: &SelectEvent<Vec<FormatItem>>, cx| {
+                this.on_fps_changed(cx);
+            },
+        ));
+        viewer._subscriptions.push(cx.subscribe_in(
             &viewer.preset_select,
             window,
             |this, _, _: &SelectEvent<Vec<SettingItem>>, window, cx| {
@@ -472,14 +486,25 @@ impl Viewer {
     }
 
     fn selected_format(&self, cx: &App) -> Option<CaptureFormat> {
-        let id = self.format_select.read(cx).selected_value()?.to_string();
-        if id == AUTO_FORMAT_ID {
-            return preferred_format(&self.formats, &self.settings);
+        let mut settings = self.settings.clone();
+        if let Some(id) = self.pixel_select.read(cx).selected_value()
+            && let Some(format) = PixelFormatPref::from_id(id.as_ref())
+        {
+            settings.pixel_format = format;
         }
-        self.formats
-            .iter()
-            .find(|format| format.id() == id)
-            .cloned()
+        let resolution_id = self
+            .resolution_select
+            .read(cx)
+            .selected_value()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| settings.resolution_id.clone());
+        let fps_id = self
+            .fps_select
+            .read(cx)
+            .selected_value()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| settings.fps_id.clone());
+        resolve_format(&self.formats, &resolution_id, &fps_id, &settings)
     }
 
     fn on_device_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -490,17 +515,7 @@ impl Viewer {
             self.status = err.into();
             Vec::new()
         });
-        let items = format_items(&self.formats, &self.settings);
-        let preferred_row = preferred_format(&self.formats, &self.settings).and_then(|preferred| {
-            self.formats
-                .iter()
-                .position(|format| format.id() == preferred.id())
-                .map(|row| row + 1)
-        });
-        self.format_select.update(cx, |state, cx| {
-            state.set_items(items, window, cx);
-            state.set_selected_index(Some(IndexPath::new(preferred_row.unwrap_or(0))), window, cx);
-        });
+        self.refresh_mode_items(window, cx);
         cx.notify();
     }
 
@@ -541,10 +556,7 @@ impl Viewer {
 
         if self.formats.is_empty() {
             self.formats = list_formats(&device.index).unwrap_or_default();
-            let items = format_items(&self.formats, &self.settings);
-            self.format_select.update(cx, |state, cx| {
-                state.set_items(items, window, cx);
-            });
+            self.refresh_mode_items(window, cx);
         }
 
         let format = self.selected_format(cx);
@@ -624,7 +636,7 @@ impl Viewer {
             return;
         }
         self.settings.save();
-        self.refresh_auto_format_label(window, cx);
+        self.refresh_mode_items(window, cx);
         if self.session.is_some() {
             self.disconnect(window, cx);
             self.connect(window, cx);
@@ -632,21 +644,50 @@ impl Viewer {
         cx.notify();
     }
 
-    fn refresh_auto_format_label(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self
-            .format_select
-            .read(cx)
-            .selected_value()
-            .map(|id| id.to_string());
-        let items = format_items(&self.formats, &self.settings);
-        let selected_row =
-            selected.and_then(|id| items.iter().position(|item| item.id.as_ref() == id));
-        self.format_select.update(cx, |state, cx| {
-            state.set_items(items, window, cx);
-            if let Some(row) = selected_row {
-                state.set_selected_index(Some(IndexPath::new(row)), window, cx);
-            }
+    fn refresh_mode_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let resolution_items = resolution_items(&self.formats, &self.settings);
+        let resolution_row = item_row(&resolution_items, &self.settings.resolution_id);
+        self.resolution_select.update(cx, |state, cx| {
+            state.set_items(resolution_items, window, cx);
+            state.set_selected_index(Some(IndexPath::new(resolution_row)), window, cx);
         });
+        self.refresh_fps_items(window, cx);
+    }
+
+    fn refresh_fps_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items = fps_items(&self.formats, &self.settings.resolution_id);
+        let row = item_row(&items, &self.settings.fps_id);
+        if row == 0 && self.settings.fps_id != AUTO_FORMAT_ID {
+            self.settings.fps_id = AUTO_FORMAT_ID.into();
+            self.settings.save();
+        }
+        self.fps_select.update(cx, |state, cx| {
+            state.set_items(items, window, cx);
+            state.set_selected_index(Some(IndexPath::new(row)), window, cx);
+        });
+    }
+
+    fn on_resolution_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.resolution_select.read(cx).selected_value() else {
+            return;
+        };
+        if id.as_ref() == self.settings.resolution_id {
+            return;
+        }
+        self.settings.resolution_id = id.to_string();
+        self.settings.save();
+        self.refresh_fps_items(window, cx);
+    }
+
+    fn on_fps_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.fps_select.read(cx).selected_value() else {
+            return;
+        };
+        if id.as_ref() == self.settings.fps_id {
+            return;
+        }
+        self.settings.fps_id = id.to_string();
+        self.settings.save();
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -668,7 +709,7 @@ impl Viewer {
                             field()
                                 .label("Capture mode")
                                 .description(
-                                    "Applies when Format is Auto. Low latency prefers uncompressed 1080p60.",
+                                    "Applies when Resolution and FPS are Auto. Low latency prefers uncompressed 1080p60.",
                                 )
                                 .child(
                                     Select::new(&preset_select)
@@ -861,9 +902,17 @@ impl Viewer {
                     })),
             )
             .child(
-                div().w(px(240.)).child(
-                    Select::new(&self.format_select)
-                        .placeholder("Format")
+                div().w(px(150.)).child(
+                    Select::new(&self.resolution_select)
+                        .placeholder("Resolution")
+                        .disabled(connected)
+                        .small(),
+                ),
+            )
+            .child(
+                div().w(px(100.)).child(
+                    Select::new(&self.fps_select)
+                        .placeholder("FPS")
                         .disabled(connected)
                         .small(),
                 ),
@@ -985,16 +1034,75 @@ fn device_items(devices: &[CaptureDevice]) -> Vec<DeviceItem> {
         .collect()
 }
 
-fn format_items(formats: &[CaptureFormat], settings: &AppSettings) -> Vec<FormatItem> {
+const COMMON_SIZES: [(u32, u32); 4] = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720)];
+const COMMON_FPS: [u32; 4] = [120, 60, 50, 30];
+
+fn is_common_mode(format: &CaptureFormat) -> bool {
+    COMMON_SIZES.contains(&(format.width, format.height)) && COMMON_FPS.contains(&format.fps)
+}
+
+fn resolution_items(formats: &[CaptureFormat], settings: &AppSettings) -> Vec<FormatItem> {
     let mut items = vec![FormatItem {
         id: AUTO_FORMAT_ID.into(),
         title: format!("Auto ({})", settings.capture_preset.label().to_lowercase()).into(),
     }];
-    items.extend(formats.iter().map(|format| FormatItem {
-        id: format.id().into(),
-        title: format.label().into(),
+    let mut sizes = formats
+        .iter()
+        .filter(|format| is_common_mode(format))
+        .map(|format| {
+            (
+                format.size_id(),
+                format.size_label(),
+                format.width,
+                format.height,
+            )
+        })
+        .collect::<Vec<_>>();
+    sizes.sort_by(|a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)));
+    sizes.dedup_by(|a, b| a.0 == b.0);
+    items.extend(sizes.into_iter().map(|(id, title, ..)| FormatItem {
+        id: id.into(),
+        title: title.into(),
     }));
     items
+}
+
+fn fps_items(formats: &[CaptureFormat], resolution_id: &str) -> Vec<FormatItem> {
+    let mut items = vec![FormatItem {
+        id: AUTO_FORMAT_ID.into(),
+        title: "Auto".into(),
+    }];
+    let size = parse_size_choice(resolution_id);
+    let mut rates = formats
+        .iter()
+        .filter(|format| is_common_mode(format))
+        .filter(|format| {
+            size.is_none_or(|(width, height)| format.width == width && format.height == height)
+        })
+        .map(|format| format.fps)
+        .collect::<Vec<_>>();
+    rates.sort_unstable_by(|a, b| b.cmp(a));
+    rates.dedup();
+    items.extend(rates.into_iter().map(|fps| FormatItem {
+        id: fps.to_string().into(),
+        title: format!("{fps} fps").into(),
+    }));
+    items
+}
+
+fn parse_size_choice(id: &str) -> Option<(u32, u32)> {
+    if id.is_empty() || id == AUTO_FORMAT_ID {
+        return None;
+    }
+    let (width, height) = id.split_once('x')?;
+    Some((width.parse().ok()?, height.parse().ok()?))
+}
+
+fn item_row(items: &[FormatItem], id: &str) -> usize {
+    items
+        .iter()
+        .position(|item| item.id.as_ref() == id)
+        .unwrap_or(0)
 }
 
 fn preset_items() -> Vec<SettingItem> {
