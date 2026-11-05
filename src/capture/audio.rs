@@ -17,11 +17,12 @@ pub struct AudioMonitor {
 }
 
 impl AudioMonitor {
-    pub fn start(matchers: &[String]) -> Result<Self, String> {
+    pub fn start(matchers: &[String], audio_buffer: u32) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let muted = Arc::new(AtomicBool::new(false));
         let matchers = matchers.to_vec();
+        let audio_buffer = audio_buffer.clamp(64, 1024);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 
         let stop_thread = Arc::clone(&stop);
@@ -32,6 +33,7 @@ impl AudioMonitor {
             .spawn(move || {
                 run_monitor(
                     &matchers,
+                    audio_buffer,
                     stop_thread,
                     volume_thread,
                     muted_thread,
@@ -80,12 +82,13 @@ impl Drop for AudioMonitor {
 
 fn run_monitor(
     matchers: &[String],
+    audio_buffer: u32,
     stop: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
     ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
-    match run_monitor_inner(matchers, stop, volume, muted, &ready_tx) {
+    match run_monitor_inner(matchers, audio_buffer, stop, volume, muted, &ready_tx) {
         Ok(()) => {}
         Err(err) => {
             let _ = ready_tx.send(Err(err));
@@ -95,6 +98,7 @@ fn run_monitor(
 
 fn run_monitor_inner(
     matchers: &[String],
+    audio_buffer: u32,
     stop: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
@@ -104,7 +108,7 @@ fn run_monitor_inner(
     let input_device = find_input_device(&host, matchers)?;
     let input_supported = pick_input_config(&input_device)?;
     let input_format = input_supported.sample_format();
-    let input_config = low_latency_config(&input_supported);
+    let input_config = low_latency_config(&input_supported, audio_buffer);
 
     log::info!(
         "Audio input: {} @ {} Hz, {} ch, {input_format:?}, buffer {:?}",
@@ -123,7 +127,7 @@ fn run_monitor_inner(
         input_config.channels,
     )?;
     let output_format = output_supported.sample_format();
-    let output_config = low_latency_config(&output_supported);
+    let output_config = low_latency_config(&output_supported, audio_buffer);
 
     log::info!(
         "Audio output: {} @ {} Hz, {} ch, {output_format:?}, buffer {:?}",
@@ -266,15 +270,10 @@ fn push_samples<I>(
     }
 }
 
-fn low_latency_config(supported: &SupportedStreamConfig) -> StreamConfig {
+fn low_latency_config(supported: &SupportedStreamConfig, preferred: u32) -> StreamConfig {
     let mut config = supported.config();
-    const CANDIDATES: [u32; 4] = [128, 256, 512, 1024];
     if let SupportedBufferSize::Range { min, max } = *supported.buffer_size() {
-        if let Some(n) = CANDIDATES.into_iter().find(|n| (min..=max).contains(n)) {
-            config.buffer_size = BufferSize::Fixed(n);
-        } else {
-            config.buffer_size = BufferSize::Fixed(min.max(64).min(max));
-        }
+        config.buffer_size = BufferSize::Fixed(preferred.clamp(min, max));
     }
     config
 }

@@ -1,5 +1,6 @@
 mod app;
 mod capture;
+mod settings;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
@@ -17,7 +18,7 @@ fn main() {
             window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
             window_min_size: Some(size(px(720.), px(480.))),
             titlebar: Some(TitlebarOptions {
-                title: Some("ShadowCast".into()),
+                title: Some("USB Capture".into()),
                 ..Default::default()
             }),
             app_id: Some("shadowcast-app".into()),

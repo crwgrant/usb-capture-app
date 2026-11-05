@@ -2,8 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    dialog::{DialogClose, DialogFooter},
+    form::{Form, field},
     h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
     slider::{Slider, SliderEvent, SliderState},
@@ -19,6 +21,9 @@ use crate::capture::{
     CaptureDevice, CaptureFormat, CaptureSession, VideoFrame, enumerate_devices, list_formats,
     preferred_format,
 };
+use crate::settings::{
+    APP_NAME, APP_REPO, APP_VERSION, AppSettings, CapturePreset, PixelFormatPref,
+};
 
 const AUTO_FORMAT_ID: &str = "auto";
 
@@ -33,6 +38,7 @@ struct VideoStage {
     frame: Option<Arc<RenderImage>>,
     retired: Vec<Arc<RenderImage>>,
     live: bool,
+    vsync: bool,
     shown_frames: u64,
     fps: f32,
     last_fps_at: Instant,
@@ -48,6 +54,7 @@ impl VideoStage {
             frame: None,
             retired: Vec::new(),
             live: false,
+            vsync: true,
             shown_frames: 0,
             fps: 0.0,
             last_fps_at: Instant::now(),
@@ -56,14 +63,20 @@ impl VideoStage {
         }
     }
 
-    fn start(&mut self, session: &CaptureSession, cx: &mut Context<Self>) {
+    fn start(&mut self, session: &CaptureSession, vsync: bool, cx: &mut Context<Self>) {
         self.frames = Some(session.frame_slot());
         self.error = Some(session.error_slot());
         self.live = true;
+        self.vsync = vsync;
         self.shown_frames = 0;
         self.last_fps_count = 0;
         self.last_fps_at = Instant::now();
         self.fps = 0.0;
+        cx.notify();
+    }
+
+    fn set_vsync(&mut self, vsync: bool, cx: &mut Context<Self>) {
+        self.vsync = vsync;
         cx.notify();
     }
 
@@ -131,6 +144,9 @@ impl Render for VideoStage {
         self.drop_retired(window, cx);
         self.pull_frame(cx);
         if self.live {
+            // GPUI presents on the compositor clock either way; vsync is stored
+            // for a future tearing present path.
+            let _ = self.vsync;
             window.request_animation_frame();
         }
 
@@ -204,12 +220,35 @@ impl SelectItem for FormatItem {
     }
 }
 
+#[derive(Clone)]
+struct SettingItem {
+    id: SharedString,
+    title: SharedString,
+}
+
+impl SelectItem for SettingItem {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+}
+
 pub struct Viewer {
     devices: Vec<CaptureDevice>,
     formats: Vec<CaptureFormat>,
     device_select: Entity<SelectState<Vec<DeviceItem>>>,
     format_select: Entity<SelectState<Vec<FormatItem>>>,
+    preset_select: Entity<SelectState<Vec<SettingItem>>>,
+    pixel_select: Entity<SelectState<Vec<SettingItem>>>,
+    buffer_select: Entity<SelectState<Vec<SettingItem>>>,
+    audio_buffer_select: Entity<SelectState<Vec<SettingItem>>>,
     volume_slider: Entity<SliderState>,
+    settings: AppSettings,
     session: Option<CaptureSession>,
     video_stage: Entity<VideoStage>,
     status: SharedString,
@@ -236,8 +275,9 @@ impl Viewer {
                 Vec::new()
             });
         }
-        let format_items = format_items(&formats);
-        let preferred_row = preferred_format(&formats).and_then(|preferred| {
+        let settings = AppSettings::load();
+        let format_items = format_items(&formats, &settings);
+        let preferred_row = preferred_format(&formats, &settings).and_then(|preferred| {
             formats
                 .iter()
                 .position(|format| format.id() == preferred.id())
@@ -247,6 +287,59 @@ impl Viewer {
             SelectState::new(
                 format_items,
                 Some(IndexPath::new(preferred_row.unwrap_or(0))),
+                window,
+                cx,
+            )
+        });
+
+        let preset_select = cx.new(|cx| {
+            SelectState::new(
+                preset_items(),
+                Some(IndexPath::new(
+                    CapturePreset::all()
+                        .iter()
+                        .position(|preset| *preset == settings.capture_preset)
+                        .unwrap_or(1),
+                )),
+                window,
+                cx,
+            )
+        });
+        let pixel_select = cx.new(|cx| {
+            SelectState::new(
+                pixel_items(),
+                Some(IndexPath::new(
+                    PixelFormatPref::all()
+                        .iter()
+                        .position(|format| *format == settings.pixel_format)
+                        .unwrap_or(0),
+                )),
+                window,
+                cx,
+            )
+        });
+        let buffer_select = cx.new(|cx| {
+            SelectState::new(
+                buffer_items(),
+                Some(IndexPath::new(
+                    AppSettings::BUFFER_CHOICES
+                        .iter()
+                        .position(|n| *n == settings.capture_buffers)
+                        .unwrap_or(0),
+                )),
+                window,
+                cx,
+            )
+        });
+        let audio_buffer_select = cx.new(|cx| {
+            SelectState::new(
+                audio_buffer_items(),
+                Some(IndexPath::new(
+                    AppSettings::AUDIO_CHOICES
+                        .iter()
+                        .position(|n| *n == settings.audio_buffer)
+                        .unwrap_or(1),
+                )),
                 window,
                 cx,
             )
@@ -267,7 +360,12 @@ impl Viewer {
             formats,
             device_select,
             format_select,
+            preset_select,
+            pixel_select,
+            buffer_select,
+            audio_buffer_select,
             volume_slider,
+            settings,
             session: None,
             video_stage,
             status: "Idle".into(),
@@ -325,6 +423,34 @@ impl Viewer {
                 }
             },
         ));
+        viewer._subscriptions.push(cx.subscribe_in(
+            &viewer.preset_select,
+            window,
+            |this, _, _: &SelectEvent<Vec<SettingItem>>, window, cx| {
+                this.on_capture_setting(window, cx);
+            },
+        ));
+        viewer._subscriptions.push(cx.subscribe_in(
+            &viewer.pixel_select,
+            window,
+            |this, _, _: &SelectEvent<Vec<SettingItem>>, window, cx| {
+                this.on_capture_setting(window, cx);
+            },
+        ));
+        viewer._subscriptions.push(cx.subscribe_in(
+            &viewer.buffer_select,
+            window,
+            |this, _, _: &SelectEvent<Vec<SettingItem>>, window, cx| {
+                this.on_capture_setting(window, cx);
+            },
+        ));
+        viewer._subscriptions.push(cx.subscribe_in(
+            &viewer.audio_buffer_select,
+            window,
+            |this, _, _: &SelectEvent<Vec<SettingItem>>, window, cx| {
+                this.on_capture_setting(window, cx);
+            },
+        ));
 
         if selected.is_some() {
             viewer.connect(window, cx);
@@ -348,7 +474,7 @@ impl Viewer {
     fn selected_format(&self, cx: &App) -> Option<CaptureFormat> {
         let id = self.format_select.read(cx).selected_value()?.to_string();
         if id == AUTO_FORMAT_ID {
-            return preferred_format(&self.formats);
+            return preferred_format(&self.formats, &self.settings);
         }
         self.formats
             .iter()
@@ -364,8 +490,8 @@ impl Viewer {
             self.status = err.into();
             Vec::new()
         });
-        let items = format_items(&self.formats);
-        let preferred_row = preferred_format(&self.formats).and_then(|preferred| {
+        let items = format_items(&self.formats, &self.settings);
+        let preferred_row = preferred_format(&self.formats, &self.settings).and_then(|preferred| {
             self.formats
                 .iter()
                 .position(|format| format.id() == preferred.id())
@@ -415,7 +541,7 @@ impl Viewer {
 
         if self.formats.is_empty() {
             self.formats = list_formats(&device.index).unwrap_or_default();
-            let items = format_items(&self.formats);
+            let items = format_items(&self.formats, &self.settings);
             self.format_select.update(cx, |state, cx| {
                 state.set_items(items, window, cx);
             });
@@ -425,7 +551,7 @@ impl Viewer {
         self.status = format!("Opening {}…", device.name).into();
         cx.notify();
 
-        match CaptureSession::start(device.clone(), format) {
+        match CaptureSession::start(device.clone(), format, &self.settings) {
             Ok(session) => {
                 session.set_volume(self.volume);
                 session.set_muted(self.muted);
@@ -433,7 +559,7 @@ impl Viewer {
                 self.fps = 0.0;
                 self.frame_size = None;
                 self.video_stage.update(cx, |stage, cx| {
-                    stage.start(&session, cx);
+                    stage.start(&session, self.settings.vsync, cx);
                 });
                 self.status = if self.audio_ok {
                     format!("Live · {}", device.name).into()
@@ -462,6 +588,221 @@ impl Viewer {
         self.frame_size = None;
         self.fps = 0.0;
         cx.notify();
+    }
+
+    fn on_capture_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if let Some(id) = self.preset_select.read(cx).selected_value()
+            && let Some(preset) = CapturePreset::from_id(id.as_ref())
+            && preset != self.settings.capture_preset
+        {
+            self.settings.capture_preset = preset;
+            changed = true;
+        }
+        if let Some(id) = self.pixel_select.read(cx).selected_value()
+            && let Some(format) = PixelFormatPref::from_id(id.as_ref())
+            && format != self.settings.pixel_format
+        {
+            self.settings.pixel_format = format;
+            changed = true;
+        }
+        if let Some(id) = self.buffer_select.read(cx).selected_value()
+            && let Ok(buffers) = id.as_ref().parse::<u32>()
+            && buffers != self.settings.capture_buffers
+        {
+            self.settings.capture_buffers = buffers;
+            changed = true;
+        }
+        if let Some(id) = self.audio_buffer_select.read(cx).selected_value()
+            && let Ok(frames) = id.as_ref().parse::<u32>()
+            && frames != self.settings.audio_buffer
+        {
+            self.settings.audio_buffer = frames;
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        self.settings.save();
+        self.refresh_auto_format_label(window, cx);
+        if self.session.is_some() {
+            self.disconnect(window, cx);
+            self.connect(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn refresh_auto_format_label(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self
+            .format_select
+            .read(cx)
+            .selected_value()
+            .map(|id| id.to_string());
+        let items = format_items(&self.formats, &self.settings);
+        let selected_row =
+            selected.and_then(|id| items.iter().position(|item| item.id.as_ref() == id));
+        self.format_select.update(cx, |state, cx| {
+            state.set_items(items, window, cx);
+            if let Some(row) = selected_row {
+                state.set_selected_index(Some(IndexPath::new(row)), window, cx);
+            }
+        });
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let viewer = cx.entity();
+        let preset_select = self.preset_select.clone();
+        let pixel_select = self.pixel_select.clone();
+        let buffer_select = self.buffer_select.clone();
+        let audio_buffer_select = self.audio_buffer_select.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let settings = viewer.read(cx).settings.clone();
+            dialog
+                .title("Settings")
+                .w(px(520.))
+                .centered()
+                .child(
+                    Form::horizontal()
+                        .label_width(px(160.))
+                        .child(
+                            field()
+                                .label("Capture mode")
+                                .description(
+                                    "Applies when Format is Auto. Low latency prefers uncompressed 1080p60.",
+                                )
+                                .child(
+                                    Select::new(&preset_select)
+                                        .placeholder("Capture mode")
+                                        .small(),
+                                ),
+                        )
+                        .child(
+                            field()
+                                .label("Pixel format")
+                                .description(
+                                    "NV12/YUY2 skip JPEG encode and decode. MJPEG is for 1440p and 4K.",
+                                )
+                                .child(
+                                    Select::new(&pixel_select)
+                                        .placeholder("Pixel format")
+                                        .small(),
+                                ),
+                        )
+                        .child(
+                            field()
+                                .label("Capture buffers")
+                                .description("2 is lowest delay. 3–4 can hide a dropped frame.")
+                                .child(
+                                    Select::new(&buffer_select)
+                                        .placeholder("Buffers")
+                                        .small(),
+                                ),
+                        )
+                        .child(
+                            field()
+                                .label("Audio buffer")
+                                .description("Frames per callback. Smaller is snappier.")
+                                .child(
+                                    Select::new(&audio_buffer_select)
+                                        .placeholder("Audio buffer")
+                                        .small(),
+                                ),
+                        )
+                        .child(
+                            field()
+                                .label("Vsync")
+                                .description(
+                                    "Matches the display refresh. Immediate/tearing present is not available yet.",
+                                )
+                                .child(
+                                    Switch::new("vsync")
+                                        .label(if settings.vsync {
+                                            "On"
+                                        } else {
+                                            "Off"
+                                        })
+                                        .checked(settings.vsync)
+                                        .on_change({
+                                            let viewer = viewer.clone();
+                                            move |checked: &bool, window, cx| {
+                                                viewer.update(cx, |this, cx| {
+                                                    this.settings.vsync = *checked;
+                                                    this.settings.save();
+                                                    this.video_stage.update(cx, |stage, cx| {
+                                                        stage.set_vsync(*checked, cx);
+                                                    });
+                                                    cx.notify();
+                                                });
+                                                let _ = window;
+                                            }
+                                        }),
+                                ),
+                        )
+                        .child(
+                            field()
+                                .label("GPU decode")
+                                .description(
+                                    "VA-API JPEG to a GPU texture is not implemented yet.",
+                                )
+                                .child(
+                                    Switch::new("hw-decode")
+                                        .label("Coming soon")
+                                        .checked(false)
+                                        .disabled(true),
+                                ),
+                        ),
+                )
+                .footer(
+                    DialogFooter::new().child(DialogClose::new().trigger(|button| button.label("Close"))),
+                )
+        });
+    }
+
+    fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.open_dialog(cx, |dialog, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            dialog
+                .title("About")
+                .w(px(420.))
+                .centered()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_3()
+                        .items_center()
+                        .py_2()
+                        .child(Icon::new(IconName::Play).large())
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(APP_NAME),
+                        )
+                        .child(div().text_sm().child(format!("Version {APP_VERSION}")))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_center()
+                                .text_color(muted)
+                                .child(
+                                    "A low-latency viewer for Genki ShadowCast and other UVC capture devices.",
+                                ),
+                        )
+                        .child(
+                            Button::new("repo")
+                                .ghost()
+                                .icon(IconName::Github)
+                                .label("github.com/crwgrant/usb-capture-app")
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(APP_REPO);
+                                }),
+                        ),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().trigger(|button| button.label("Close"))),
+                )
+        });
     }
 }
 
@@ -498,7 +839,7 @@ impl Viewer {
                     .gap_1()
                     .items_center()
                     .child(Icon::new(IconName::Play).small())
-                    .child("ShadowCast"),
+                    .child(APP_NAME),
             )
             .child(
                 div().w(px(260.)).child(
@@ -537,6 +878,26 @@ impl Viewer {
                     })),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("settings")
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .label("Settings")
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("about")
+                    .ghost()
+                    .icon(IconName::Info)
+                    .label("About")
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_about(window, cx);
+                    })),
+            )
             .child(
                 Switch::new("mute")
                     .label(if self.muted { "Muted" } else { "Audio" })
@@ -624,16 +985,56 @@ fn device_items(devices: &[CaptureDevice]) -> Vec<DeviceItem> {
         .collect()
 }
 
-fn format_items(formats: &[CaptureFormat]) -> Vec<FormatItem> {
+fn format_items(formats: &[CaptureFormat], settings: &AppSettings) -> Vec<FormatItem> {
     let mut items = vec![FormatItem {
         id: AUTO_FORMAT_ID.into(),
-        title: "Auto (best available)".into(),
+        title: format!("Auto ({})", settings.capture_preset.label().to_lowercase()).into(),
     }];
     items.extend(formats.iter().map(|format| FormatItem {
         id: format.id().into(),
         title: format.label().into(),
     }));
     items
+}
+
+fn preset_items() -> Vec<SettingItem> {
+    CapturePreset::all()
+        .into_iter()
+        .map(|preset| SettingItem {
+            id: preset.id().into(),
+            title: preset.label().into(),
+        })
+        .collect()
+}
+
+fn pixel_items() -> Vec<SettingItem> {
+    PixelFormatPref::all()
+        .into_iter()
+        .map(|format| SettingItem {
+            id: format.id().into(),
+            title: format.label().into(),
+        })
+        .collect()
+}
+
+fn buffer_items() -> Vec<SettingItem> {
+    AppSettings::BUFFER_CHOICES
+        .into_iter()
+        .map(|n| SettingItem {
+            id: n.to_string().into(),
+            title: format!("{n} buffers").into(),
+        })
+        .collect()
+}
+
+fn audio_buffer_items() -> Vec<SettingItem> {
+    AppSettings::AUDIO_CHOICES
+        .into_iter()
+        .map(|n| SettingItem {
+            id: n.to_string().into(),
+            title: format!("{n} frames").into(),
+        })
+        .collect()
 }
 
 fn default_device_index(devices: &[CaptureDevice]) -> Option<usize> {

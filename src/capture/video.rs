@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 
 use super::audio::AudioMonitor;
 use super::device::CaptureDevice;
+use crate::settings::{AppSettings, CapturePreset, PixelFormatPref};
 
 /// One decoded BGRA frame ready for GPUI's `RenderImage`.
 #[derive(Clone)]
@@ -89,7 +90,11 @@ pub struct CaptureSession {
 }
 
 impl CaptureSession {
-    pub fn start(device: CaptureDevice, requested: Option<CaptureFormat>) -> Result<Self, String> {
+    pub fn start(
+        device: CaptureDevice,
+        requested: Option<CaptureFormat>,
+        settings: &AppSettings,
+    ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(Mutex::new(None));
         let error = Arc::new(Mutex::new(None));
@@ -102,6 +107,7 @@ impl CaptureSession {
         let index = device.index.clone();
 
         let video_path = device.video_path.clone();
+        let buffers = settings.capture_buffers.clamp(2, 4);
         let video_thread = thread::Builder::new()
             .name("shadowcast-video".into())
             .spawn(move || {
@@ -109,6 +115,7 @@ impl CaptureSession {
                     index,
                     video_path,
                     requested,
+                    buffers,
                     stop_thread,
                     frames_thread,
                     format_thread,
@@ -119,7 +126,7 @@ impl CaptureSession {
             })
             .map_err(|err| format!("Failed to start capture thread: {err}"))?;
 
-        let audio = match AudioMonitor::start(&device.audio_matches) {
+        let audio = match AudioMonitor::start(&device.audio_matches, settings.audio_buffer) {
             Ok(monitor) => Some(monitor),
             Err(err) => {
                 log::warn!("Audio monitor unavailable: {err}");
@@ -190,43 +197,83 @@ pub fn list_formats(index: &CameraIndex) -> Result<Vec<CaptureFormat>, String> {
         .into_iter()
         .map(CaptureFormat::from_camera)
         .collect::<Vec<_>>();
-    formats.sort_by(compare_formats);
+    formats.sort_by(|a, b| compare_formats(a, b, &AppSettings::default()));
     formats.dedup();
     Ok(formats)
 }
 
-pub fn preferred_format(formats: &[CaptureFormat]) -> Option<CaptureFormat> {
-    formats.iter().min_by(|a, b| compare_formats(a, b)).cloned()
+pub fn preferred_format(
+    formats: &[CaptureFormat],
+    settings: &AppSettings,
+) -> Option<CaptureFormat> {
+    formats
+        .iter()
+        .min_by(|a, b| compare_formats(a, b, settings))
+        .cloned()
 }
 
-fn compare_formats(a: &CaptureFormat, b: &CaptureFormat) -> std::cmp::Ordering {
-    fourcc_rank(a.fourcc)
-        .cmp(&fourcc_rank(b.fourcc))
-        .then_with(|| over_1080(a).cmp(&over_1080(b)))
-        .then_with(|| fps_distance(a).cmp(&fps_distance(b)))
-        .then_with(|| pixel_distance(a).cmp(&pixel_distance(b)))
+fn compare_formats(
+    a: &CaptureFormat,
+    b: &CaptureFormat,
+    settings: &AppSettings,
+) -> std::cmp::Ordering {
+    fourcc_rank(a.fourcc, settings)
+        .cmp(&fourcc_rank(b.fourcc, settings))
+        .then_with(|| over_target(a, settings).cmp(&over_target(b, settings)))
+        .then_with(|| fps_distance(a, settings).cmp(&fps_distance(b, settings)))
+        .then_with(|| pixel_distance(a, settings).cmp(&pixel_distance(b, settings)))
 }
 
-fn over_1080(format: &CaptureFormat) -> u8 {
-    u8::from(format.width * format.height > 1920 * 1080)
+fn over_target(format: &CaptureFormat, settings: &AppSettings) -> u8 {
+    u8::from(format.width * format.height > settings.capture_preset.target_pixels())
 }
 
-fn fps_distance(format: &CaptureFormat) -> u32 {
-    format.fps.abs_diff(60)
+fn fps_distance(format: &CaptureFormat, settings: &AppSettings) -> u32 {
+    format.fps.abs_diff(settings.capture_preset.target_fps())
 }
 
-fn pixel_distance(format: &CaptureFormat) -> u32 {
-    (format.width * format.height).abs_diff(1920 * 1080)
+fn pixel_distance(format: &CaptureFormat, settings: &AppSettings) -> u32 {
+    (format.width * format.height).abs_diff(settings.capture_preset.target_pixels())
 }
 
-fn fourcc_rank(format: FrameFormat) -> u8 {
-    match format {
-        FrameFormat::MJPEG => 0,
-        FrameFormat::YUYV => 1,
-        FrameFormat::NV12 => 2,
-        FrameFormat::RAWRGB | FrameFormat::RAWBGR => 3,
-        FrameFormat::GRAY => 4,
-    }
+fn fourcc_rank(format: FrameFormat, settings: &AppSettings) -> u8 {
+    let preferred = match settings.pixel_format {
+        PixelFormatPref::Auto => match settings.capture_preset {
+            CapturePreset::LowLatency => match format {
+                FrameFormat::NV12 => 0,
+                FrameFormat::YUYV => 1,
+                FrameFormat::MJPEG => 2,
+                FrameFormat::RAWRGB | FrameFormat::RAWBGR => 3,
+                FrameFormat::GRAY => 4,
+            },
+            CapturePreset::Balanced | CapturePreset::HighDetail => match format {
+                FrameFormat::MJPEG => 0,
+                FrameFormat::NV12 => 1,
+                FrameFormat::YUYV => 2,
+                FrameFormat::RAWRGB | FrameFormat::RAWBGR => 3,
+                FrameFormat::GRAY => 4,
+            },
+        },
+        PixelFormatPref::Nv12 => match format {
+            FrameFormat::NV12 => 0,
+            FrameFormat::YUYV => 1,
+            FrameFormat::MJPEG => 2,
+            _ => 5,
+        },
+        PixelFormatPref::Yuy2 => match format {
+            FrameFormat::YUYV => 0,
+            FrameFormat::NV12 => 1,
+            FrameFormat::MJPEG => 2,
+            _ => 5,
+        },
+        PixelFormatPref::Mjpeg => match format {
+            FrameFormat::MJPEG => 0,
+            FrameFormat::NV12 => 1,
+            FrameFormat::YUYV => 2,
+            _ => 5,
+        },
+    };
+    preferred
 }
 
 fn fourcc_name(format: FrameFormat) -> &'static str {
@@ -263,13 +310,21 @@ fn run_capture(
     index: CameraIndex,
     video_path: Option<String>,
     requested: Option<CaptureFormat>,
+    buffers: u32,
     stop: Arc<AtomicBool>,
     frames: Arc<Mutex<Option<VideoFrame>>>,
     active_format: Arc<Mutex<Option<CaptureFormat>>>,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if let Some(path) = video_path.as_deref() {
-        match run_v4l_capture(path, requested.as_ref(), &stop, &frames, &active_format) {
+        match run_v4l_capture(
+            path,
+            requested.as_ref(),
+            buffers,
+            &stop,
+            &frames,
+            &active_format,
+        ) {
             Ok(()) => return Ok(()),
             Err(err) => log::warn!("Low-latency V4L2 path failed ({err}); falling back to nokhwa"),
         }
@@ -326,6 +381,7 @@ fn run_nokhwa_capture(
 fn run_v4l_capture(
     path: &str,
     requested: Option<&CaptureFormat>,
+    buffers: u32,
     stop: &Arc<AtomicBool>,
     frames: &Arc<Mutex<Option<VideoFrame>>>,
     active_format: &Arc<Mutex<Option<CaptureFormat>>>,
@@ -356,11 +412,14 @@ fn run_v4l_capture(
     }
 
     let negotiated = v4l_negotiated_format(&dev)?;
-    let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 2)
+    let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, buffers)
         .map_err(|err| format!("Failed to map V4L2 buffers: {err}"))?;
     stream.set_timeout(Duration::from_millis(250));
 
-    log::info!("Capture started (V4L2, 2 buffers): {}", negotiated.label());
+    log::info!(
+        "Capture started (V4L2, {buffers} buffers): {}",
+        negotiated.label()
+    );
     *active_format.lock() = Some(negotiated.clone());
 
     let mut scratch = Vec::new();

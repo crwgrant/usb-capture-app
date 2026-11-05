@@ -6942,6 +6942,8 @@ dependencies = [
  "log",
  "nokhwa",
  "parking_lot",
+ "serde",
+ "serde_json",
  "v4l",
  "zune-core 0.5.3",
  "zune-jpeg 0.5.15",
