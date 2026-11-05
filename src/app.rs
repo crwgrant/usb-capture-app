@@ -154,14 +154,31 @@ impl Render for VideoStage {
         div()
             .id("stage")
             .size_full()
+            .min_h(px(0.))
             .bg(gpui_kit::black())
             .overflow_hidden()
             .child(match &self.frame {
-                Some(frame) => img(frame.clone())
-                    .id("video-frame")
+                Some(frame) => {
+                    let frame = frame.clone();
+                    canvas(
+                        |bounds, _, _| bounds,
+                        move |bounds, _, window, _| {
+                            let fitted = ObjectFit::Contain.get_bounds(bounds, frame.size(0));
+                            window
+                                .paint_image(
+                                    bounds,
+                                    fitted,
+                                    Corners::default(),
+                                    frame.clone(),
+                                    0,
+                                    false,
+                                )
+                                .ok();
+                        },
+                    )
                     .size_full()
-                    .object_fit(ObjectFit::Contain)
-                    .into_any_element(),
+                    .into_any_element()
+                }
                 None => v_flex()
                     .size_full()
                     .items_center()
@@ -858,7 +875,15 @@ impl Render for Viewer {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.toolbar(connected, cx))
-            .child(div().flex_1().w_full().child(self.video_stage.clone()))
+            .child(
+                div()
+                    .id("video-pane")
+                    .flex_1()
+                    .w_full()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .child(self.video_stage.clone()),
+            )
             .child(self.status_bar(connected, cx))
     }
 }
@@ -868,6 +893,7 @@ impl Viewer {
         let theme = cx.theme().clone();
         h_flex()
             .w_full()
+            .flex_shrink_0()
             .px_3()
             .py_2()
             .gap_2()
@@ -991,6 +1017,7 @@ impl Viewer {
 
         h_flex()
             .w_full()
+            .flex_shrink_0()
             .px_3()
             .py_1()
             .gap_3()
