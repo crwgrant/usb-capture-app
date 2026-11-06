@@ -507,7 +507,12 @@ impl Viewer {
         }
 
         if selected.is_some() {
-            viewer.connect(window, cx);
+            if can_auto_connect() {
+                viewer.connect(window, cx);
+            } else {
+                viewer.status =
+                    "Grant camera access in the system prompt, then press Connect.".into();
+            }
         } else if viewer.devices.is_empty() {
             viewer.status = "No capture devices found. Plug in a ShadowCast over USB 3.".into();
         } else {
@@ -1356,6 +1361,17 @@ fn audio_buffer_items() -> Vec<SettingItem> {
             title: format!("{n} frames").into(),
         })
         .collect()
+}
+
+fn can_auto_connect() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        nokhwa::nokhwa_check()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
 }
 
 fn default_device_index(devices: &[CaptureDevice]) -> Option<usize> {
