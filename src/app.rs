@@ -848,7 +848,7 @@ impl Viewer {
                             field()
                                 .label("Capture mode")
                                 .description(
-                                    "Applies when Resolution and FPS are Auto. Low latency prefers uncompressed 1080p60.",
+                                    "Applies when Resolution and FPS are Auto.\nLow latency prefers uncompressed 1080p60.",
                                 )
                                 .child(
                                     Select::new(&preset_select)
@@ -860,7 +860,7 @@ impl Viewer {
                             field()
                                 .label("Pixel format")
                                 .description(
-                                    "NV12/YUY2 skip JPEG encode and decode. MJPEG is for 1440p and 4K.",
+                                    "NV12/YUY2 skip JPEG encode and decode.\nMJPEG is for 1440p and 4K.",
                                 )
                                 .child(
                                     Select::new(&pixel_select)
@@ -892,7 +892,7 @@ impl Viewer {
                             field()
                                 .label("Vsync")
                                 .description(
-                                    "Matches the display refresh. Immediate/tearing present is not available yet.",
+                                    "Matches the display refresh.\nImmediate/tearing present is not available yet.",
                                 )
                                 .child(
                                     Switch::new("vsync")
@@ -931,31 +931,6 @@ impl Viewer {
                                         .disabled(true),
                                 ),
                         )
-                        .child(
-                            field()
-                                .label("Auto-hide controls")
-                                .description(
-                                    "Hide the toolbar and status bar after a few seconds idle. Move the mouse to show them again.",
-                                )
-                                .child(
-                                    Switch::new("auto-hide-settings")
-                                        .label(if settings.auto_hide_chrome {
-                                            "On"
-                                        } else {
-                                            "Off"
-                                        })
-                                        .checked(settings.auto_hide_chrome)
-                                        .on_change({
-                                            let viewer = viewer.clone();
-                                            move |checked: &bool, window, cx| {
-                                                viewer.update(cx, |this, cx| {
-                                                    this.set_auto_hide_chrome(*checked, cx);
-                                                });
-                                                let _ = window;
-                                            }
-                                        }),
-                                ),
-                        ),
                 )
                 .footer(
                     DialogFooter::new().child(DialogClose::new().trigger(|button| button.label("Close"))),
