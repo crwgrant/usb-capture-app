@@ -342,6 +342,7 @@ fn open_camera(index: &CameraIndex, requested: Option<&CaptureFormat>) -> Result
     })
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn run_capture(
     index: CameraIndex,
     video_path: Option<String>,
