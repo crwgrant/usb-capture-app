@@ -15,6 +15,16 @@ cargo run --release
 
 A debug build will decode and present far below 60 fps. Use `--release`.
 
+## AppImage
+
+Build a single-file Linux package:
+
+```bash
+./scripts/build-appimage.sh
+```
+
+That writes `dist/USB_Capture-<version>-x86_64.AppImage`. Make it executable and run it. PipeWire, Vulkan, and V4L2 stay on the host so the viewer can use the session capture devices. The binary is linked against a recent glibc, so it needs a current distro.
+
 Plug the ShadowCast in over USB 3. Auto starts at 1080p60. The toolbar has separate Resolution and FPS menus (720p–4K, 30/50/60/120). Pixel format lives in Settings. Together they pick the same UVC mode the old long format list did.
 
 ## Roadmap
@@ -36,3 +46,4 @@ Check items off as they land. Settings that already exist in the app are marked 
 - [x] Settings menu
 - [x] About page (name, version, GitHub repo)
 - [x] Auto-hide toolbar and status bar
+- [x] Linux AppImage package

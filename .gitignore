@@ -1,4 +1,6 @@
 /target
+/dist
+/.cache
 **/*.rs.bk
 .idea/
 .vscode/

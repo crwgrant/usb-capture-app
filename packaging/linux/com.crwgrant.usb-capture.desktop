@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=USB Capture
+GenericName=Capture viewer
+Comment=Low-latency viewer for Genki ShadowCast and other UVC capture devices
+Exec=shadowcast-app
+Icon=usb-capture
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=capture;hdmi;uvc;shadowcast;
+StartupWMClass=shadowcast-app
+StartupNotify=true

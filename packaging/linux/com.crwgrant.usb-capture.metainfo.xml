@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.crwgrant.usb-capture</id>
+  <name>USB Capture</name>
+  <summary>Low-latency viewer for Genki ShadowCast and other UVC capture devices</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="com.crwgrant">
+    <name>crwgrant</name>
+  </developer>
+  <url type="homepage">https://github.com/crwgrant/usb-capture-app</url>
+  <description>
+    <p>
+      USB Capture is a low-latency Linux viewer for Genki ShadowCast and other
+      UVC/UAC HDMI capture devices. It talks to the dongle as a normal webcam
+      and microphone using V4L2 and PipeWire.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.crwgrant.usb-capture.desktop</launchable>
+  <provides>
+    <binary>shadowcast-app</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>
