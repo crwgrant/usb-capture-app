@@ -125,6 +125,8 @@ pub struct AppSettings {
     pub vsync: bool,
     #[serde(default)]
     pub hardware_decode: bool,
+    #[serde(default)]
+    pub auto_hide_chrome: bool,
 }
 
 fn default_capture_buffers() -> u32 {
@@ -155,6 +157,7 @@ impl Default for AppSettings {
             audio_buffer: 128,
             vsync: true,
             hardware_decode: false,
+            auto_hide_chrome: false,
         }
     }
 }

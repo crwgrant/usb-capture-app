@@ -26,6 +26,7 @@ use crate::settings::{
 };
 
 const AUTO_FORMAT_ID: &str = "auto";
+const CHROME_HIDE_AFTER: Duration = Duration::from_millis(2500);
 
 enum VideoEvent {
     Stats { fps: f32, size: Option<(u32, u32)> },
@@ -154,14 +155,31 @@ impl Render for VideoStage {
         div()
             .id("stage")
             .size_full()
+            .min_h(px(0.))
             .bg(gpui_kit::black())
             .overflow_hidden()
             .child(match &self.frame {
-                Some(frame) => img(frame.clone())
-                    .id("video-frame")
+                Some(frame) => {
+                    let frame = frame.clone();
+                    canvas(
+                        |bounds, _, _| bounds,
+                        move |bounds, _, window, _| {
+                            let fitted = ObjectFit::Contain.get_bounds(bounds, frame.size(0));
+                            window
+                                .paint_image(
+                                    bounds,
+                                    fitted,
+                                    Corners::default(),
+                                    frame.clone(),
+                                    0,
+                                    false,
+                                )
+                                .ok();
+                        },
+                    )
                     .size_full()
-                    .object_fit(ObjectFit::Contain)
-                    .into_any_element(),
+                    .into_any_element()
+                }
                 None => v_flex()
                     .size_full()
                     .items_center()
@@ -258,6 +276,11 @@ pub struct Viewer {
     audio_ok: bool,
     fps: f32,
     frame_size: Option<(u32, u32)>,
+    fullscreen: bool,
+    chrome_visible: bool,
+    chrome_hovered: bool,
+    window_hovered: bool,
+    _hide_chrome_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -375,6 +398,11 @@ impl Viewer {
             audio_ok: false,
             fps: 0.0,
             frame_size: None,
+            fullscreen: window.is_fullscreen(),
+            chrome_visible: true,
+            chrome_hovered: false,
+            window_hovered: window.is_window_hovered(),
+            _hide_chrome_task: None,
             _subscriptions: Vec::new(),
         };
 
@@ -465,6 +493,18 @@ impl Viewer {
                 this.on_capture_setting(window, cx);
             },
         ));
+        viewer
+            ._subscriptions
+            .push(cx.observe_window_bounds(window, |this, window, cx| {
+                let fullscreen = window.is_fullscreen();
+                if this.fullscreen != fullscreen {
+                    this.fullscreen = fullscreen;
+                    cx.notify();
+                }
+            }));
+        if viewer.settings.auto_hide_chrome {
+            viewer.schedule_hide_chrome(cx);
+        }
 
         if selected.is_some() {
             viewer.connect(window, cx);
@@ -591,6 +631,105 @@ impl Viewer {
         cx.notify();
     }
 
+    fn set_auto_hide_chrome(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.auto_hide_chrome == enabled {
+            return;
+        }
+        self.settings.auto_hide_chrome = enabled;
+        self.settings.save();
+        self.chrome_visible = true;
+        if enabled {
+            self.schedule_hide_chrome(cx);
+        } else {
+            self.chrome_hovered = false;
+            self._hide_chrome_task = None;
+        }
+        cx.notify();
+    }
+
+    fn reveal_chrome(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.auto_hide_chrome || !self.window_hovered {
+            return;
+        }
+        if !self.chrome_visible {
+            self.chrome_visible = true;
+            cx.notify();
+        }
+        self.schedule_hide_chrome(cx);
+    }
+
+    fn sync_window_hover(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.settings.auto_hide_chrome {
+            return;
+        }
+        let hovered = window.is_window_hovered();
+        if hovered == self.window_hovered {
+            return;
+        }
+        self.window_hovered = hovered;
+        if hovered {
+            self.reveal_chrome(cx);
+        } else {
+            self.hide_chrome_now(cx);
+        }
+    }
+
+    fn hide_chrome_now(&mut self, cx: &mut Context<Self>) {
+        self.chrome_hovered = false;
+        self._hide_chrome_task = None;
+        if self.chrome_visible {
+            self.chrome_visible = false;
+            cx.notify();
+        }
+    }
+
+    fn set_window_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered == self.window_hovered {
+            if hovered {
+                self.reveal_chrome(cx);
+            }
+            return;
+        }
+        self.window_hovered = hovered;
+        if hovered {
+            self.reveal_chrome(cx);
+        } else {
+            self.hide_chrome_now(cx);
+        }
+    }
+
+    fn set_chrome_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.chrome_hovered = hovered;
+        if hovered {
+            self.reveal_chrome(cx);
+        } else if self.window_hovered {
+            self.schedule_hide_chrome(cx);
+        } else {
+            self.hide_chrome_now(cx);
+        }
+    }
+
+    fn schedule_hide_chrome(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.auto_hide_chrome || self.chrome_hovered || !self.window_hovered {
+            self._hide_chrome_task = None;
+            return;
+        }
+        self._hide_chrome_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHROME_HIDE_AFTER).await;
+            this.update(cx, |this, cx| {
+                if this.settings.auto_hide_chrome
+                    && this.window_hovered
+                    && !this.chrome_hovered
+                    && this.chrome_visible
+                {
+                    this.chrome_visible = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
     fn disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.video_stage.update(cx, |stage, cx| {
             stage.stop(window, cx);
@@ -709,7 +848,7 @@ impl Viewer {
                             field()
                                 .label("Capture mode")
                                 .description(
-                                    "Applies when Resolution and FPS are Auto. Low latency prefers uncompressed 1080p60.",
+                                    "Applies when Resolution and FPS are Auto.\nLow latency prefers uncompressed 1080p60.",
                                 )
                                 .child(
                                     Select::new(&preset_select)
@@ -721,7 +860,7 @@ impl Viewer {
                             field()
                                 .label("Pixel format")
                                 .description(
-                                    "NV12/YUY2 skip JPEG encode and decode. MJPEG is for 1440p and 4K.",
+                                    "NV12/YUY2 skip JPEG encode and decode.\nMJPEG is for 1440p and 4K.",
                                 )
                                 .child(
                                     Select::new(&pixel_select)
@@ -753,7 +892,7 @@ impl Viewer {
                             field()
                                 .label("Vsync")
                                 .description(
-                                    "Matches the display refresh. Immediate/tearing present is not available yet.",
+                                    "Matches the display refresh.\nImmediate/tearing present is not available yet.",
                                 )
                                 .child(
                                     Switch::new("vsync")
@@ -791,7 +930,7 @@ impl Viewer {
                                         .checked(false)
                                         .disabled(true),
                                 ),
-                        ),
+                        )
                 )
                 .footer(
                     DialogFooter::new().child(DialogClose::new().trigger(|button| button.label("Close"))),
@@ -849,17 +988,48 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = window;
+        self.sync_window_hover(window, cx);
+        if self.settings.auto_hide_chrome {
+            window.request_animation_frame();
+        }
         let connected = self.session.is_some();
         let theme = cx.theme().clone();
+        let show_chrome = self.chrome_visible;
 
         v_flex()
+            .id("viewer")
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(self.toolbar(connected, cx))
-            .child(div().flex_1().w_full().child(self.video_stage.clone()))
-            .child(self.status_bar(connected, cx))
+            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                if *hovered {
+                    if window.is_window_hovered() {
+                        this.set_window_hovered(true, cx);
+                    }
+                } else if !window.is_window_hovered() {
+                    this.set_window_hovered(false, cx);
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
+                this.set_window_hovered(true, cx);
+            }))
+            .when(show_chrome, |this| this.child(self.toolbar(connected, cx)))
+            .child(
+                div()
+                    .id("video-pane")
+                    .flex_1()
+                    .w_full()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
+                        this.set_window_hovered(true, cx);
+                    }))
+                    .child(self.video_stage.clone()),
+            )
+            .when(show_chrome, |this| {
+                this.child(self.status_bar(connected, cx))
+            })
     }
 }
 
@@ -867,7 +1037,9 @@ impl Viewer {
     fn toolbar(&self, connected: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         h_flex()
+            .id("toolbar")
             .w_full()
+            .flex_shrink_0()
             .px_3()
             .py_2()
             .gap_2()
@@ -875,6 +1047,9 @@ impl Viewer {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.secondary)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.set_chrome_hovered(*hovered, cx);
+            }))
             .child(
                 h_flex()
                     .gap_1()
@@ -948,6 +1123,39 @@ impl Viewer {
                     })),
             )
             .child(
+                Button::new("fullscreen")
+                    .ghost()
+                    .icon(if self.fullscreen {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    })
+                    .label(if self.fullscreen {
+                        "Exit Fullscreen"
+                    } else {
+                        "Fullscreen"
+                    })
+                    .small()
+                    .tooltip(if self.fullscreen {
+                        "Exit fullscreen"
+                    } else {
+                        "Enter fullscreen"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        window.toggle_fullscreen();
+                        this.fullscreen = !this.fullscreen;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Switch::new("auto-hide")
+                    .label("Auto-hide")
+                    .checked(self.settings.auto_hide_chrome)
+                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                        this.set_auto_hide_chrome(*checked, cx);
+                    })),
+            )
+            .child(
                 Switch::new("mute")
                     .label(if self.muted { "Muted" } else { "Audio" })
                     .checked(!self.muted)
@@ -990,7 +1198,9 @@ impl Viewer {
         };
 
         h_flex()
+            .id("status-bar")
             .w_full()
+            .flex_shrink_0()
             .px_3()
             .py_1()
             .gap_3()
@@ -999,6 +1209,9 @@ impl Viewer {
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.secondary)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.set_chrome_hovered(*hovered, cx);
+            }))
             .text_color(theme.muted_foreground)
             .child(self.status.clone())
             .child(div().flex_1())

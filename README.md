@@ -35,3 +35,4 @@ Check items off as they land. Settings that already exist in the app are marked 
 
 - [x] Settings menu
 - [x] About page (name, version, GitHub repo)
+- [x] Auto-hide toolbar and status bar
