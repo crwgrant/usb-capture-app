@@ -27,7 +27,6 @@ use crate::settings::{
 
 const AUTO_FORMAT_ID: &str = "auto";
 const CHROME_HIDE_AFTER: Duration = Duration::from_millis(2500);
-const CHROME_HIDE_AFTER_LEAVE: Duration = Duration::from_millis(150);
 
 enum VideoEvent {
     Stats { fps: f32, size: Option<(u32, u32)> },
@@ -280,6 +279,7 @@ pub struct Viewer {
     fullscreen: bool,
     chrome_visible: bool,
     chrome_hovered: bool,
+    window_hovered: bool,
     _hide_chrome_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -401,6 +401,7 @@ impl Viewer {
             fullscreen: window.is_fullscreen(),
             chrome_visible: true,
             chrome_hovered: false,
+            window_hovered: window.is_window_hovered(),
             _hide_chrome_task: None,
             _subscriptions: Vec::new(),
         };
@@ -647,7 +648,7 @@ impl Viewer {
     }
 
     fn reveal_chrome(&mut self, cx: &mut Context<Self>) {
-        if !self.settings.auto_hide_chrome {
+        if !self.settings.auto_hide_chrome || !self.window_hovered {
             return;
         }
         if !self.chrome_visible {
@@ -657,12 +658,43 @@ impl Viewer {
         self.schedule_hide_chrome(cx);
     }
 
-    fn set_window_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+    fn sync_window_hover(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.settings.auto_hide_chrome {
+            return;
+        }
+        let hovered = window.is_window_hovered();
+        if hovered == self.window_hovered {
+            return;
+        }
+        self.window_hovered = hovered;
         if hovered {
             self.reveal_chrome(cx);
         } else {
-            self.chrome_hovered = false;
-            self.schedule_hide_chrome_in(CHROME_HIDE_AFTER_LEAVE, cx);
+            self.hide_chrome_now(cx);
+        }
+    }
+
+    fn hide_chrome_now(&mut self, cx: &mut Context<Self>) {
+        self.chrome_hovered = false;
+        self._hide_chrome_task = None;
+        if self.chrome_visible {
+            self.chrome_visible = false;
+            cx.notify();
+        }
+    }
+
+    fn set_window_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered == self.window_hovered {
+            if hovered {
+                self.reveal_chrome(cx);
+            }
+            return;
+        }
+        self.window_hovered = hovered;
+        if hovered {
+            self.reveal_chrome(cx);
+        } else {
+            self.hide_chrome_now(cx);
         }
     }
 
@@ -670,26 +702,26 @@ impl Viewer {
         self.chrome_hovered = hovered;
         if hovered {
             self.reveal_chrome(cx);
-        } else {
+        } else if self.window_hovered {
             self.schedule_hide_chrome(cx);
+        } else {
+            self.hide_chrome_now(cx);
         }
     }
 
     fn schedule_hide_chrome(&mut self, cx: &mut Context<Self>) {
-        self.schedule_hide_chrome_in(CHROME_HIDE_AFTER, cx);
-    }
-
-    fn schedule_hide_chrome_in(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        if !self.settings.auto_hide_chrome || self.chrome_hovered {
+        if !self.settings.auto_hide_chrome || self.chrome_hovered || !self.window_hovered {
             self._hide_chrome_task = None;
             return;
         }
         self._hide_chrome_task = Some(cx.spawn(async move |this, cx| {
-            if !delay.is_zero() {
-                cx.background_executor().timer(delay).await;
-            }
+            cx.background_executor().timer(CHROME_HIDE_AFTER).await;
             this.update(cx, |this, cx| {
-                if this.settings.auto_hide_chrome && !this.chrome_hovered && this.chrome_visible {
+                if this.settings.auto_hide_chrome
+                    && this.window_hovered
+                    && !this.chrome_hovered
+                    && this.chrome_visible
+                {
                     this.chrome_visible = false;
                     cx.notify();
                 }
@@ -981,7 +1013,10 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = window;
+        self.sync_window_hover(window, cx);
+        if self.settings.auto_hide_chrome {
+            window.request_animation_frame();
+        }
         let connected = self.session.is_some();
         let theme = cx.theme().clone();
         let show_chrome = self.chrome_visible;
@@ -992,11 +1027,17 @@ impl Render for Viewer {
             .bg(theme.background)
             .text_color(theme.foreground)
             .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.set_window_hovered(*hovered, cx);
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                if *hovered {
+                    if window.is_window_hovered() {
+                        this.set_window_hovered(true, cx);
+                    }
+                } else if !window.is_window_hovered() {
+                    this.set_window_hovered(false, cx);
+                }
             }))
             .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
-                this.reveal_chrome(cx);
+                this.set_window_hovered(true, cx);
             }))
             .when(show_chrome, |this| this.child(self.toolbar(connected, cx)))
             .child(
@@ -1007,7 +1048,7 @@ impl Render for Viewer {
                     .min_h(px(0.))
                     .overflow_hidden()
                     .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
-                        this.reveal_chrome(cx);
+                        this.set_window_hovered(true, cx);
                     }))
                     .child(self.video_stage.clone()),
             )
