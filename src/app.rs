@@ -275,6 +275,7 @@ pub struct Viewer {
     audio_ok: bool,
     fps: f32,
     frame_size: Option<(u32, u32)>,
+    fullscreen: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -392,6 +393,7 @@ impl Viewer {
             audio_ok: false,
             fps: 0.0,
             frame_size: None,
+            fullscreen: window.is_fullscreen(),
             _subscriptions: Vec::new(),
         };
 
@@ -482,6 +484,15 @@ impl Viewer {
                 this.on_capture_setting(window, cx);
             },
         ));
+        viewer
+            ._subscriptions
+            .push(cx.observe_window_bounds(window, |this, window, cx| {
+                let fullscreen = window.is_fullscreen();
+                if this.fullscreen != fullscreen {
+                    this.fullscreen = fullscreen;
+                    cx.notify();
+                }
+            }));
 
         if selected.is_some() {
             viewer.connect(window, cx);
@@ -971,6 +982,31 @@ impl Viewer {
                     .small()
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_about(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("fullscreen")
+                    .ghost()
+                    .icon(if self.fullscreen {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    })
+                    .label(if self.fullscreen {
+                        "Exit Fullscreen"
+                    } else {
+                        "Fullscreen"
+                    })
+                    .small()
+                    .tooltip(if self.fullscreen {
+                        "Exit fullscreen"
+                    } else {
+                        "Enter fullscreen"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        window.toggle_fullscreen();
+                        this.fullscreen = !this.fullscreen;
+                        cx.notify();
                     })),
             )
             .child(
