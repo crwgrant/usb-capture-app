@@ -6949,6 +6949,7 @@ dependencies = [
  "libc",
  "log",
  "nokhwa",
+ "nokhwa-bindings-macos",
  "parking_lot",
  "serde",
  "serde_json",
