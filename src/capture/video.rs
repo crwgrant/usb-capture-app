@@ -63,7 +63,7 @@ impl CaptureFormat {
         Self {
             width: resolution.width(),
             height: resolution.height(),
-            fps: format.frame_rate(),
+            fps: normalize_fps(format.frame_rate()),
             fourcc: format.format(),
         }
     }
@@ -188,16 +188,53 @@ impl Drop for CaptureSession {
 }
 
 pub fn list_formats(index: &CameraIndex) -> Result<Vec<CaptureFormat>, String> {
-    let mut camera = open_camera(index, None)?;
-    let mut formats = camera
-        .compatible_camera_formats()
-        .map_err(|err| format!("Failed to query formats: {err}"))?
-        .into_iter()
-        .map(CaptureFormat::from_camera)
-        .collect::<Vec<_>>();
+    let mut formats = {
+        #[cfg(target_os = "macos")]
+        {
+            list_formats_avfoundation(index)?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut camera = open_camera(index, None)?;
+            camera
+                .compatible_camera_formats()
+                .map_err(|err| format!("Failed to query formats: {err}"))?
+                .into_iter()
+                .map(CaptureFormat::from_camera)
+                .collect::<Vec<_>>()
+        }
+    };
     formats.sort_by(|a, b| compare_formats(a, b, &AppSettings::default()));
     formats.dedup();
+    log::info!("Device reports {} capture modes", formats.len());
     Ok(formats)
+}
+
+/// nokhwa's AVFoundation backend filters `format != fourcc` when listing
+/// modes, so `compatible_camera_formats()` is often empty. Query the device
+/// formats directly instead.
+#[cfg(target_os = "macos")]
+fn list_formats_avfoundation(index: &CameraIndex) -> Result<Vec<CaptureFormat>, String> {
+    let device = nokhwa_bindings_macos::AVCaptureDevice::new(index)
+        .map_err(|err| format!("Failed to query formats: {err}"))?;
+    device
+        .supported_formats()
+        .map_err(|err| format!("Failed to query formats: {err}"))
+        .map(|formats| {
+            formats
+                .into_iter()
+                .map(CaptureFormat::from_camera)
+                .collect()
+        })
+}
+
+fn normalize_fps(fps: u32) -> u32 {
+    for canonical in [120, 60, 50, 30, 25, 24, 15] {
+        if fps.abs_diff(canonical) <= 1 {
+            return canonical;
+        }
+    }
+    fps
 }
 
 pub fn preferred_format(

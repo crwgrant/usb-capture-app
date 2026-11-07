@@ -1253,13 +1253,6 @@ fn device_items(devices: &[CaptureDevice]) -> Vec<DeviceItem> {
         .collect()
 }
 
-const COMMON_SIZES: [(u32, u32); 4] = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720)];
-const COMMON_FPS: [u32; 4] = [120, 60, 50, 30];
-
-fn is_common_mode(format: &CaptureFormat) -> bool {
-    COMMON_SIZES.contains(&(format.width, format.height)) && COMMON_FPS.contains(&format.fps)
-}
-
 fn resolution_items(formats: &[CaptureFormat], settings: &AppSettings) -> Vec<FormatItem> {
     let mut items = vec![FormatItem {
         id: AUTO_FORMAT_ID.into(),
@@ -1267,7 +1260,6 @@ fn resolution_items(formats: &[CaptureFormat], settings: &AppSettings) -> Vec<Fo
     }];
     let mut sizes = formats
         .iter()
-        .filter(|format| is_common_mode(format))
         .map(|format| {
             (
                 format.size_id(),
@@ -1294,7 +1286,6 @@ fn fps_items(formats: &[CaptureFormat], resolution_id: &str) -> Vec<FormatItem> 
     let size = parse_size_choice(resolution_id);
     let mut rates = formats
         .iter()
-        .filter(|format| is_common_mode(format))
         .filter(|format| {
             size.is_none_or(|(width, height)| format.width == width && format.height == height)
         })
