@@ -665,6 +665,17 @@ impl Viewer {
         }
     }
 
+    fn hide_chrome_now(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.auto_hide_chrome {
+            return;
+        }
+        self.hide_chrome_at = None;
+        if self.chrome_visible {
+            self.chrome_visible = false;
+            cx.notify();
+        }
+    }
+
     fn maybe_hide_chrome(&mut self) {
         if !self.settings.auto_hide_chrome || !self.chrome_visible {
             return;
@@ -983,6 +994,26 @@ impl Render for Viewer {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 this.on_pointer_moved(event.position, cx);
             }))
+            .on_mouse_exit(cx.listener(|this, _: &MouseExitEvent, _, cx| {
+                this.hide_chrome_now(cx);
+            }))
+            .child({
+                let viewer = cx.entity();
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            viewer.update(cx, |this, cx| this.hide_chrome_now(cx));
+                        });
+                    },
+                )
+                .absolute()
+                .w(px(0.))
+                .h(px(0.))
+            })
             .when(show_chrome, |this| this.child(self.toolbar(connected, cx)))
             .child(
                 div()
