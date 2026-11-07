@@ -1,5 +1,6 @@
 mod app;
 mod capture;
+mod menu;
 mod settings;
 
 use gpui_kit::component::{Theme, ThemeMode};
@@ -37,10 +38,11 @@ fn main() {
             ..Default::default()
         };
 
-        open_window(options, cx, |window, cx| {
+        let (_, viewer) = open_window(options, cx, |window, cx| {
             cx.new(|cx| Viewer::new(window, cx))
         })
         .expect("Failed to open window");
+        crate::menu::init(cx, &viewer);
     });
 }
 
