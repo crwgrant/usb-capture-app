@@ -834,7 +834,7 @@ impl Viewer {
         self.settings.save();
     }
 
-    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let viewer = cx.entity();
         let preset_select = self.preset_select.clone();
         let pixel_select = self.pixel_select.clone();
@@ -943,7 +943,7 @@ impl Viewer {
         });
     }
 
-    fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.open_dialog(cx, |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
             dialog
@@ -1006,6 +1006,20 @@ impl Render for Viewer {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .on_action(cx.listener(|this, _: &crate::menu::OpenSettings, window, cx| {
+                this.open_settings(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::menu::OpenAbout, window, cx| {
+                this.open_about(window, cx);
+            }))
+            .on_action(|_: &crate::menu::CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &crate::menu::MinimizeWindow, window, _| {
+                window.minimize_window();
+            })
+            .on_action(|_: &crate::menu::ZoomWindow, window, _| window.zoom_window())
+            .on_action(|_: &crate::menu::ToggleFullScreen, window, _| {
+                window.toggle_fullscreen();
+            })
             .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
             .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                 if *hovered {
